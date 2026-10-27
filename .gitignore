@@ -1,0 +1,46 @@
+# 构建产物
+build/
+out/
+dist/
+*.class
+
+# 运行时数据（含服务器私有信息，切勿提交）
+bots.dat
+*.dat
+forwarding.secret
+velocity.toml
+*.log
+logs/
+
+# 依赖与缓存
+.gradle/
+.gradle-cache/
+.gradle-user-home/
+/caches/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 临时文件
+*.tmp
+*.bak
+*.bak_*
+*.orig
+*.rej
+*~
+
+# 打包文件（发布产物，本地生成）
+*.jar
+!gradle/wrapper/gradle-wrapper.jar

@@ -1,0 +1,11 @@
+{
+  "id": "chatbridge",
+  "name": "ChatBridge",
+  "version": "1.1.0",
+  "description": "Cross-server chat with server tags, switch notice and command passthrough",
+  "authors": [
+    "Melor"
+  ],
+  "dependencies": [],
+  "main": "com.melor.chatbridge.ChatBridge"
+}

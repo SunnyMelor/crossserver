@@ -1,0 +1,11 @@
+{
+  "id": "tabfix",
+  "name": "TabFix",
+  "version": "1.3.1",
+  "description": "Keeps server-side fake players in the tab list and trims server tags per viewer",
+  "authors": [
+    "Melor"
+  ],
+  "dependencies": [],
+  "main": "com.melor.tabfix.TabFix"
+}
