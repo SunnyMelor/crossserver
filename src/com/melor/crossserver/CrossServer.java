@@ -1,12 +1,17 @@
-package com.melor.chatbridge;
+package com.melor.crossserver;
 
+import com.google.inject.Inject;
 import com.velocitypowered.api.command.CommandMeta;
 import com.velocitypowered.api.command.CommandSource;
 import com.velocitypowered.api.command.SimpleCommand;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
+import com.velocitypowered.api.event.connection.PostLoginEvent;
 import com.velocitypowered.api.event.player.PlayerChatEvent;
 import com.velocitypowered.api.event.player.ServerPostConnectEvent;
+import com.velocitypowered.api.event.player.ServerPreConnectEvent;
+import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
+import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
 import com.velocitypowered.api.plugin.Plugin;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.Player;
@@ -18,7 +23,6 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.slf4j.Logger;
 
-import com.google.inject.Inject;
 import java.io.IOException;
 import java.io.Reader;
 import java.io.Writer;
@@ -42,17 +46,25 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 跨服聊天：带服务器前缀的统一聊天、跨服 join/leave/切服提示、跨服 /msg。
- * 以 !! 开头的消息原样放行给子服（MCDR 指令依赖子服控制台输出解析）。
+ * 跨服核心插件：带子服标签的聊天、跨服事件提示、跨服私聊，以及 TAB 列表的假人与前缀处理。
+ *
+ * <p>本插件由原 ChatBridge（聊天）与 TabFix（TAB）合并而成。两者面向的功能层不同：</p>
+ * <ul>
+ *   <li>聊天部分只订阅 {@code PlayerChatEvent} 等事件，被动接收，出错最多影响单条消息。</li>
+ *   <li>TAB 部分需要注入 netty 管线，<b>拦截并改写玩家信息包</b>，出错可能影响整条连接。
+ *       因此这部分逻辑封装在独立的 {@link TabModule} 中，与聊天逻辑保持隔离。</li>
+ * </ul>
+ *
+ * <p>以 {@code !!} 等前缀开头的消息原样放行给子服（MCDR 指令依赖子服控制台输出解析）。</p>
  */
 @Plugin(
-        id = "chatbridge",
-        name = "ChatBridge",
-        version = "1.1.0",
-        description = "Cross-server chat with server tags, switch notice and command passthrough",
+        id = "crossserver",
+        name = "CrossServer",
+        version = "2.1.1",
+        description = "Cross-server chat, server switch notices and TAB list handling",
         authors = {"Melor"}
 )
-public final class ChatBridge {
+public final class CrossServer {
 
     private static final Pattern PLACEHOLDER = Pattern.compile("%([a-z_]+)%");
     private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacyAmpersand();
@@ -65,20 +77,21 @@ public final class ChatBridge {
         DEFAULTS.put("format.chat", "【%server%】%name%: %message%");
         DEFAULTS.put("format.join", "【%server%】%name% 加入了游戏");
         DEFAULTS.put("format.leave", "【%server%】%name% 离开了游戏");
-        // 注意：别用 ➡️（U+27A1 + U+FE0F），默认字体没有这两个码位，客户端会渲染成方块
-        DEFAULTS.put("format.switch", "【%server_from%】%name% → 【%server_to%】%name%");
+        // 箭头用 » (U+00BB)：属 Latin-1，Minecraft 原版字体自带字形，不依赖 Unifont 回退。
+        // 别用 → (U+2192) 呈现太细，也别用 ➡️ (U+27A1 + U+FE0F)，变体选择符无字形会渲染成方块
+        DEFAULTS.put("format.switch", "【%server_from%】%name% » 【%server_to%】%name%");
         DEFAULTS.put("format.list_header", "当前共有 %count% 名玩家在线:");
         DEFAULTS.put("format.list_entry", "  【%server%】%name%");
         DEFAULTS.put("format.msg_sender", "你悄悄地对 %target% 说: %message%");
         DEFAULTS.put("format.msg_target", "%sender% 悄悄地对你说: %message%");
         DEFAULTS.put("format.msg_offline", "&c玩家 %target% 不在线");
         DEFAULTS.put("format.no_permission", "&c你没有权限执行这个命令");
-        DEFAULTS.put("color.server.survival", "green");
-        DEFAULTS.put("color.server.creative", "gold");
-        DEFAULTS.put("color.server.mirror", "aqua");
         DEFAULTS.put("server.survival", "生存");
         DEFAULTS.put("server.creative", "创造");
         DEFAULTS.put("server.mirror", "镜像");
+        DEFAULTS.put("color.server.survival", "green");
+        DEFAULTS.put("color.server.creative", "gold");
+        DEFAULTS.put("color.server.mirror", "aqua");
     }
 
     private final ProxyServer server;
@@ -88,19 +101,70 @@ public final class ChatBridge {
 
     private Properties config = new Properties();
     private List<String> bypassPrefixes = List.of("!!", "!s", "==", "@", "在哪");
+    private TabModule tab;
 
     @Inject
-    public ChatBridge(ProxyServer server, Logger logger, @DataDirectory Path dataDirectory) {
+    public CrossServer(ProxyServer server, Logger logger, @DataDirectory Path dataDirectory) {
         this.server = server;
         this.logger = logger;
         this.dataDirectory = dataDirectory;
         reload();
 
-        CommandMeta chathub = server.getCommandManager().metaBuilder("chathub").aliases("cb").build();
-        server.getCommandManager().register(chathub, new ChathubCommand());
+        CommandMeta hub = server.getCommandManager().metaBuilder("chathub").aliases("cb").build();
+        server.getCommandManager().register(hub, new ChathubCommand());
 
-        CommandMeta msg = server.getCommandManager().metaBuilder("msg").aliases("tell", "whisper", "w").build();
+        CommandMeta msg = server.getCommandManager().metaBuilder("msg")
+                .aliases("tell", "whisper", "w").build();
         server.getCommandManager().register(msg, new MsgCommand());
+    }
+
+    @Subscribe
+    public void onProxyInitialize(ProxyInitializeEvent event) {
+        tab = new TabModule(server, logger, dataDirectory.resolve("tab"), this);
+        tab.start(this);
+    }
+
+    // ---------------------------------------------------------------- TAB 模块事件转发
+    // TabModule 自己不订阅事件，统一由这里转发，便于在同一插件内保持故障边界清晰
+
+    @Subscribe
+    public void onPostLogin(PostLoginEvent event) {
+        handlePostLogin(event.getPlayer());
+    }
+
+    @Subscribe
+    public void onServerPreConnectForTab(ServerPreConnectEvent event) {
+        handleServerPreConnect(event);
+    }
+
+    @Subscribe
+    public void onProxyShutdown(ProxyShutdownEvent event) {
+        if (tab != null) {
+            tab.stop();
+        }
+    }
+
+    /** 供 TAB 模块与聊天模块共用：子服名 → 显示名。 */
+    String displayServer(String name) {
+        if (name == null) {
+            return "?";
+        }
+        return config.getProperty("server." + name, name);
+    }
+
+    /**
+     * 取玩家名字在 TAB 上的实际颜色。
+     *
+     * <p>子服模组（如 rankboard）会把榜单颜色写进 TAB 条目的 displayName，
+     * TAB 模块解析时顺手记了下来。聊天栏复用同一个颜色，保证「TAB 里什么色、聊天栏就什么色」。</p>
+     *
+     * @return 记录的颜色；未知时返回 null（由调用方用默认白色）
+     */
+    private NamedTextColor nameColorOf(String username) {
+        if (tab == null || username == null) {
+            return null;
+        }
+        return tab.nameColorOf(server.getPlayer(username).map(Player::getUniqueId).orElse(null));
     }
 
     // ---------------------------------------------------------------- config
@@ -113,7 +177,7 @@ public final class ChatBridge {
                 Files.createDirectories(dataDirectory);
                 props.putAll(DEFAULTS);
                 try (Writer writer = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
-                    props.store(writer, "ChatBridge config");
+                    props.store(writer, "CrossServer config");
                 }
             }
             try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
@@ -124,6 +188,7 @@ public final class ChatBridge {
             props.putAll(DEFAULTS);
         }
         this.config = props;
+
         List<String> prefixes = new ArrayList<>();
         for (String prefix : config.getProperty("bypass_prefixes", "!!,!s,==,@,在哪").split(",")) {
             String trimmed = prefix.trim();
@@ -140,13 +205,6 @@ public final class ChatBridge {
 
     private boolean takeover() {
         return Boolean.parseBoolean(config.getProperty("takeover", "true").trim());
-    }
-
-    private String displayServer(String name) {
-        if (name == null) {
-            return "?";
-        }
-        return config.getProperty("server." + name, name);
     }
 
     private NamedTextColor serverColor(String name) {
@@ -182,8 +240,13 @@ public final class ChatBridge {
         return Component.text(displayServer(name), serverColor(name));
     }
 
+    /**
+     * 玩家名，沿用该玩家在 TAB 上的颜色（rankboard 榜单色等）。
+     * 没有记录时退回原版白色。
+     */
     private Component playerName(String name) {
-        return Component.text(name, NamedTextColor.WHITE);
+        final NamedTextColor color = nameColorOf(name);
+        return Component.text(name, color == null ? NamedTextColor.WHITE : color);
     }
 
     private Map<String, Component> base(String serverName) {
@@ -215,10 +278,11 @@ public final class ChatBridge {
         event.setResult(PlayerChatEvent.ChatResult.denied());
     }
 
-    // ---------------------------------------------------------------- join / leave
+    // ---------------------------------------------------------------- join / leave / switch
 
     @Subscribe
     public void onServerPostConnect(ServerPostConnectEvent event) {
+        handleServerPostConnect(event);
         Player player = event.getPlayer();
         Optional<String> currentOpt = player.getCurrentServer().map(sc -> sc.getServerInfo().getName());
         if (currentOpt.isEmpty()) {
@@ -249,6 +313,7 @@ public final class ChatBridge {
 
     @Subscribe
     public void onDisconnect(DisconnectEvent event) {
+        handleDisconnect(event.getPlayer());
         Player player = event.getPlayer();
         String last = lastServer.remove(player.getUniqueId());
         if (last == null || event.getLoginStatus() != DisconnectEvent.LoginStatus.SUCCESSFUL_LOGIN) {
@@ -309,12 +374,15 @@ public final class ChatBridge {
             String sub = args.length == 0 ? "list" : args[0].toLowerCase(Locale.ROOT);
             switch (sub) {
                 case "reload" -> {
-                    if (!source.hasPermission("chatbridge.reload")) {
+                    if (!source.hasPermission("crossserver.reload")) {
                         source.sendMessage(legacyComponent(raw("format.no_permission")));
                         return;
                     }
                     reload();
-                    source.sendMessage(Component.text("ChatBridge 配置已重载", NamedTextColor.GREEN));
+                    if (tab != null) {
+                        tab.reload();
+                    }
+                    source.sendMessage(Component.text("CrossServer 配置已重载", NamedTextColor.GREEN));
                 }
                 case "msg" -> {
                     if (args.length < 3) {
@@ -421,5 +489,35 @@ public final class ChatBridge {
         targetView.put("sender", Component.text(senderName, NamedTextColor.WHITE));
         targetView.put("message", Component.text(message, NamedTextColor.WHITE));
         target.sendMessage(render(raw("format.msg_target"), targetView));
+    }
+
+    // ---------------------------------------------------------------- hooks for TabModule
+
+    /** TAB 模块在玩家登录时调用，用于注入管线。 */
+    void handlePostLogin(Player player) {
+        if (tab != null) {
+            tab.onPostLogin(player);
+        }
+    }
+
+    /** TAB 模块在玩家断开时调用，用于清理状态。 */
+    void handleDisconnect(Player player) {
+        if (tab != null) {
+            tab.onDisconnect(player);
+        }
+    }
+
+    /** 切服前给 TAB 模块开快照窗口。 */
+    void handleServerPreConnect(ServerPreConnectEvent event) {
+        if (tab != null) {
+            tab.onServerPreConnect(event);
+        }
+    }
+
+    /** 切服后通知 TAB 模块重新对齐。 */
+    void handleServerPostConnect(ServerPostConnectEvent event) {
+        if (tab != null) {
+            tab.onServerPostConnect(event);
+        }
     }
 }

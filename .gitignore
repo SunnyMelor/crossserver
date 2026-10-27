@@ -33,7 +33,7 @@ logs/
 Thumbs.db
 desktop.ini
 
-# 临时文件
+# 临时与备份
 *.tmp
 *.bak
 *.bak_*

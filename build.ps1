@@ -1,11 +1,15 @@
-﻿# 重新构建 ChatBridge 插件：编译 src 下的源码并打包到 ..\plugins\ChatBridge-1.0.0.jar
-# 用法：在 PowerShell 里执行 .\build.ps1
+# 重新构建 CrossServer 插件：编译 src 下的源码并打包到 ..\plugins\CrossServer-<version>.jar
+# 用法：先关闭 Velocity，再在 PowerShell 里执行 .\build.ps1
 $ErrorActionPreference = 'Stop'
 
 $root = $PSScriptRoot
 $velocityRoot = Split-Path (Split-Path $root -Parent) -Parent
 $velocityJar = Join-Path $velocityRoot 'velocity-4.3.0-44.jar'
-$pluginJar = Join-Path $velocityRoot 'plugins\ChatBridge-1.0.0.jar'
+
+$version = '2.0.0'
+$manifest = Get-Content (Join-Path $root 'velocity-plugin.json') -Raw | ConvertFrom-Json
+if ($manifest.version) { $version = $manifest.version }
+$pluginJar = Join-Path $velocityRoot "plugins\CrossServer-$version.jar"
 
 $jdkHome = 'C:\Program Files\Eclipse Adoptium\jdk-25.0.4.101-hotspot'
 if (-not (Test-Path $jdkHome)) {

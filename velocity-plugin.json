@@ -1,0 +1,11 @@
+{
+  "id": "crossserver",
+  "name": "CrossServer",
+  "version": "2.1.1",
+  "description": "Cross-server chat, server switch notices and TAB list handling",
+  "authors": [
+    "Melor"
+  ],
+  "dependencies": [],
+  "main": "com.melor.crossserver.CrossServer"
+}
